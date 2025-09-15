@@ -1,0 +1,17 @@
+// usage dans un hook React
+import { useEffect } from 'react';
+import { openSSE } from './sseClient';
+
+export function usePublicationSSE(version, onMsg) {
+  useEffect(() => {
+    if (!version) return;
+
+    const abort = new AbortController();
+    openSSE(`${process.env.REACT_APP_API_URL}/r2d2/v1/publications/${version}/stream`, {
+      signal: abort.signal,
+      onmessage: (msg) => onMsg?.(msg),
+    }).catch(console.error);
+
+    return () => abort.abort();
+  }, [version, onMsg]);
+}
