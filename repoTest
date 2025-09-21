@@ -1,0 +1,126 @@
+package com.cacib.masai.r2d2.referential.management.repo.common;
+
+import com.cacib.masai.r2d2.referential.management.entity.common.AppLock;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Nested;
+import org.junit.jupiter.api.Test;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
+import org.springframework.transaction.annotation.Transactional;
+
+import java.time.Instant;
+import java.util.Optional;
+
+import static org.assertj.core.api.Assertions.assertThat;
+
+@DataJpaTest
+@Transactional
+class AppLockRepositoryTest {
+
+    @Autowired
+    private AppLockRepository repository;
+
+    // --- helper pour créer un lock rapidement ---
+    private AppLock newLock(String key, String owner, Instant acquiredAt, Instant expiredAt) {
+        AppLock lock = new AppLock();
+        lock.setLockKey(key);
+        lock.setOwner(owner);
+        lock.setAcquiredAt(acquiredAt);
+        lock.setExpiredAt(expiredAt);
+        return lock;
+    }
+
+    @Nested
+    @DisplayName("findByLockKeyAndExpiredAtIsGreaterThan")
+    class FindActiveByKey {
+
+        @Test
+        @DisplayName("retourne le lock quand expiredAt > now")
+        void returnsPresentWhenNotExpired() {
+            Instant now = Instant.now();
+            repository.save(newLock("job-A", "alice",
+                    now.minusSeconds(5), now.plusSeconds(60)));
+
+            Optional<AppLock> found =
+                    repository.findByLockKeyAndExpiredAtIsGreaterThan("job-A", now);
+
+            assertThat(found).isPresent();
+            assertThat(found.get().getOwner()).isEqualTo("alice");
+        }
+
+        @Test
+        @DisplayName("retourne vide quand expiredAt <= now")
+        void returnsEmptyWhenExpired() {
+            Instant now = Instant.now();
+            repository.save(newLock("job-B", "bob",
+                    now.minusSeconds(30), now.minusSeconds(1)));
+
+            Optional<AppLock> found =
+                    repository.findByLockKeyAndExpiredAtIsGreaterThan("job-B", now);
+
+            assertThat(found).isEmpty();
+        }
+    }
+
+    @Nested
+    @DisplayName("releaseOwned")
+    class ReleaseOwnedTests {
+
+        @Test
+        @DisplayName("supprime uniquement le lock correspondant au couple (lockKey, owner)")
+        void deletesOnlyOwned() {
+            Instant now = Instant.now();
+            repository.save(newLock("job-C", "carol", now, now.plusSeconds(120)));
+            repository.save(newLock("job-C", "dave",  now, now.plusSeconds(120))); // autre owner
+
+            int deleted = repository.releaseOwned("job-C", "carol");
+
+            assertThat(deleted).isEqualTo(1);
+            // il reste encore un lock pour job-C (owner=dave)
+            assertThat(repository.findAll()).hasSize(1);
+            assertThat(repository.findById("job-C")).isPresent(); // id = lockKey
+            assertThat(repository.findById("job-C").get().getOwner()).isEqualTo("dave");
+        }
+
+        @Test
+        @DisplayName("retourne 0 si aucun couple (lockKey, owner) ne matche")
+        void returnsZeroWhenNoMatch() {
+            Instant now = Instant.now();
+            repository.save(newLock("job-D", "eve", now, now.plusSeconds(60)));
+
+            int deleted = repository.releaseOwned("job-D", "bob");
+
+            assertThat(deleted).isEqualTo(0);
+            assertThat(repository.findAll()).hasSize(1);
+        }
+    }
+
+    @Nested
+    @DisplayName("releaseBlockedLock")
+    class ReleaseBlockedLockTests {
+
+        @Test
+        @DisplayName("supprime les locks expirés pour une clé donnée (<= now), conserve ceux à venir")
+        void deletesOnlyExpiredForKey() {
+            Instant now = Instant.now();
+
+            // pour job-E : 1 expiré, 1 non expiré
+            repository.save(newLock("job-E", "alice", now.minusSeconds(20), now.minusSeconds(1)));
+            repository.save(newLock("job-E", "alice", now.minusSeconds(10), now.plusSeconds(90)));
+
+            // autre clé (ne doit pas être affectée)
+            repository.save(newLock("job-F", "bob", now.minusSeconds(10), now.minusSeconds(1)));
+
+            int deleted = repository.releaseBlockedLock("job-E", now);
+            assertThat(deleted).isEqualTo(1);
+
+            // job-E doit encore exister (le non-expiré)
+            Optional<AppLock> remaining =
+                    repository.findByLockKeyAndExpiredAtIsGreaterThan("job-E", now);
+            assertThat(remaining).isPresent();
+
+            // La ligne job-F expirée n'est pas supprimée (clé différente)
+            assertThat(repository.findById("job-F")).isPresent();
+        }
+    }
+}
